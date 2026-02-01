@@ -236,19 +236,13 @@ Included files can themselves contain `$include` directives (up to 10 levels dee
     },
     // Merge agent lists from all clients
     list: {
-      $include: [
-        "./clients/mueller/agents.json5",
-        "./clients/schmidt/agents.json5",
-      ],
+      $include: ["./clients/mueller/agents.json5", "./clients/schmidt/agents.json5"],
     },
   },
 
   // Merge broadcast configs
   broadcast: {
-    $include: [
-      "./clients/mueller/broadcast.json5",
-      "./clients/schmidt/broadcast.json5",
-    ],
+    $include: ["./clients/mueller/broadcast.json5", "./clients/schmidt/broadcast.json5"],
   },
 
   channels: { whatsapp: { groupPolicy: "allowlist" } },
@@ -616,9 +610,7 @@ Group messages default to **require mention** (either metadata mention or regex 
     groupChat: { historyLimit: 50 },
   },
   agents: {
-    list: [
-      { id: "main", groupChat: { mentionPatterns: ["@openclaw", "openclaw"] } },
-    ],
+    list: [{ id: "main", groupChat: { mentionPatterns: ["@openclaw", "openclaw"] } }],
   },
 }
 ```
@@ -1388,10 +1380,7 @@ Signal reactions can emit system events (shared reaction tooling):
   channels: {
     signal: {
       reactionNotifications: "own", // off | own | all | allowlist
-      reactionAllowlist: [
-        "+15551234567",
-        "uuid:123e4567-e89b-12d3-a456-426614174000",
-      ],
+      reactionAllowlist: ["+15551234567", "uuid:123e4567-e89b-12d3-a456-426614174000"],
       historyLimit: 50, // include last N group messages as context (0 disables)
     },
   },
@@ -2354,10 +2343,7 @@ For package installs, ensure network egress, a writable root FS, and a root user
           apparmorProfile: "openclaw-sandbox",
           dns: ["1.1.1.1", "8.8.8.8"],
           extraHosts: ["internal.service:10.0.0.5"],
-          binds: [
-            "/var/run/docker.sock:/var/run/docker.sock",
-            "/home/user/source:/source:rw",
-          ],
+          binds: ["/var/run/docker.sock:/var/run/docker.sock", "/home/user/source:/source:rw"],
         },
         browser: {
           enabled: false,
@@ -2784,9 +2770,7 @@ Controls session scoping, reset policy, reset triggers, and where the session st
       maxPingPongTurns: 5,
     },
     sendPolicy: {
-      rules: [
-        { action: "deny", match: { channel: "discord", chatType: "group" } },
-      ],
+      rules: [{ action: "deny", match: { channel: "discord", chatType: "group" } }],
       default: "allow",
     },
   },
@@ -2843,10 +2827,7 @@ Example:
   skills: {
     allowBundled: ["gemini", "peekaboo"],
     load: {
-      extraDirs: [
-        "~/Projects/agent-scripts/skills",
-        "~/Projects/oss/some-skill-pack/skills",
-      ],
+      extraDirs: ["~/Projects/agent-scripts/skills", "~/Projects/oss/some-skill-pack/skills"],
     },
     install: {
       preferBrew: true,

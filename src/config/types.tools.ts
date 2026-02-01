@@ -1,8 +1,5 @@
 import type { NormalizedChatType } from "../channels/chat-type.js";
-import type {
-  AgentElevatedAllowFromConfig,
-  SessionSendPolicyAction,
-} from "./types.base.js";
+import type { AgentElevatedAllowFromConfig, SessionSendPolicyAction } from "./types.base.js";
 
 export type MediaUnderstandingScopeMatch = {
   channel?: string;
@@ -161,10 +158,7 @@ export type GroupToolPolicyConfig = {
   deny?: string[];
 };
 
-export type GroupToolPolicyBySenderConfig = Record<
-  string,
-  GroupToolPolicyConfig
->;
+export type GroupToolPolicyBySenderConfig = Record<string, GroupToolPolicyConfig>;
 
 export type ExecToolConfig = {
   /** Exec host routing (default: sandbox). */

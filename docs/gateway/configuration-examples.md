@@ -167,9 +167,7 @@ Save to `~/.openclaw/openclaw.json` and you can DM the bot from that number.
     typingIntervalSeconds: 5,
     sendPolicy: {
       default: "allow",
-      rules: [
-        { action: "deny", match: { channel: "discord", chatType: "group" } },
-      ],
+      rules: [{ action: "deny", match: { channel: "discord", chatType: "group" } }],
     },
   },
 
