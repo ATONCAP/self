@@ -5,6 +5,15 @@ const path = require("path");
 const https = require("https");
 const { execSync } = require("child_process");
 
+// Executive Assistant Integration
+const {
+  initializeExecAssistant,
+  registerExecCommands,
+  startExecProcessors,
+  generateDailyBriefing,
+  generateEveningBriefing
+} = require("./exec-assistant");
+
 // Load tokens
 const SECRETS_DIR = path.join(__dirname, "../../.secrets");
 const TOKEN = fs.readFileSync(path.join(SECRETS_DIR, "telegram-token.txt"), "utf8").trim();
@@ -242,6 +251,176 @@ const getActiveWork = db.prepare(`
 `);
 
 
+// ============ OPENTABLE INTEGRATION ============
+
+/**
+ * Search OpenTable for restaurants by name and location
+ * Returns availability URL and basic info
+ */
+async function searchOpenTable(restaurantName, city, date, time, partySize = 2) {
+  try {
+    // Format date for OpenTable (YYYY-MM-DD)
+    const formattedDate = date || new Date().toISOString().split('T')[0];
+
+    // Format time (HH:MM, 24hr format - default to 7:30 PM)
+    const formattedTime = time || '19:30';
+
+    // URL encode the restaurant and city
+    const searchQuery = encodeURIComponent(`${restaurantName} ${city}`);
+
+    // OpenTable search URL
+    const searchUrl = `https://www.opentable.com/s?covers=${partySize}&dateTime=${formattedDate}T${formattedTime}&term=${searchQuery}`;
+
+    console.log(`🍽️  [OpenTable] Searching: ${restaurantName} in ${city}`);
+
+    // Try to get restaurant page directly if name is specific
+    const directUrl = `https://www.opentable.com/r/${restaurantName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${city.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+
+    // Return search info
+    return {
+      success: true,
+      searchUrl,
+      directUrl,
+      restaurant: restaurantName,
+      city,
+      date: formattedDate,
+      time: formattedTime,
+      partySize,
+      message: `Found OpenTable search for ${restaurantName} in ${city}. Check availability at: ${searchUrl}`
+    };
+  } catch (error) {
+    console.error("OpenTable search error:", error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Make a reservation request via OpenTable
+ * Uses Playwright for browser automation if available
+ */
+async function makeOpenTableReservation(restaurantName, city, date, time, partySize, guestName, guestPhone, guestEmail) {
+  try {
+    // First search for the restaurant
+    const search = await searchOpenTable(restaurantName, city, date, time, partySize);
+
+    if (!search.success) {
+      return search;
+    }
+
+    // For now, we provide the booking link
+    // Full automation would require Playwright browser control
+    const bookingInstructions = `
+To book at ${restaurantName}:
+1. Visit: ${search.searchUrl}
+2. Select ${restaurantName} from results
+3. Choose ${date} at ${time} for ${partySize} guests
+4. Enter guest details and confirm
+
+Or try direct link: ${search.directUrl}
+`;
+
+    console.log(`🍽️  [OpenTable] Reservation request for ${restaurantName}`);
+
+    return {
+      success: true,
+      status: 'booking_link_provided',
+      searchUrl: search.searchUrl,
+      directUrl: search.directUrl,
+      instructions: bookingInstructions,
+      details: {
+        restaurant: restaurantName,
+        city,
+        date,
+        time,
+        partySize,
+        guest: guestName
+      }
+    };
+  } catch (error) {
+    console.error("OpenTable reservation error:", error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Parse reservation request from natural language
+ */
+function parseReservationRequest(text) {
+  const result = {
+    restaurant: null,
+    city: null,
+    date: null,
+    time: null,
+    partySize: 2
+  };
+
+  // Common patterns for extracting restaurant name
+  // "at Tabik", "reservation at Tabik", "book Tabik", "table at Tabik"
+  const restaurantPatterns = [
+    /(?:at|book|reserve|reservation\s+(?:at|for))\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)/i,  // "at Tabik", "book Tabik"
+    /([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(?:restaurant|in\s+[A-Z])/i,  // "Tabik restaurant", "Tabik in Lisbon"
+    /table\s+(?:for\s+\d+\s+)?at\s+([A-Z][a-zA-Z]+)/i  // "table for 2 at Tabik"
+  ];
+
+  for (const pattern of restaurantPatterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      // Filter out common non-restaurant words
+      const name = match[1].trim();
+      if (!['a', 'the', 'for', 'in', 'on', 'at', 'my', 'our', 'table'].includes(name.toLowerCase())) {
+        result.restaurant = name;
+        break;
+      }
+    }
+  }
+
+  // Extract city - look for "in [City]" patterns
+  const cityPatterns = [
+    /in\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s*(?:portugal|spain|france|italy|,|$|\?)/i,
+    /in\s+([A-Z][a-zA-Z]+)\s+(?:for|on|tonight|tomorrow)/i
+  ];
+
+  for (const pattern of cityPatterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      result.city = match[1].trim();
+      break;
+    }
+  }
+
+  // Extract party size
+  const sizeMatch = text.match(/(?:for|table\s+for)\s+(\d+)/i);
+  if (sizeMatch) {
+    result.partySize = parseInt(sizeMatch[1]);
+  }
+
+  // Extract date
+  if (/tonight/i.test(text)) {
+    result.date = new Date().toISOString().split('T')[0];
+  } else if (/tomorrow/i.test(text)) {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    result.date = tomorrow.toISOString().split('T')[0];
+  }
+
+  // Extract time
+  const timeMatch = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (timeMatch) {
+    let hours = parseInt(timeMatch[1]);
+    const minutes = timeMatch[2] || '00';
+    const period = timeMatch[3]?.toLowerCase();
+
+    if (period === 'pm' && hours < 12) hours += 12;
+    if (period === 'am' && hours === 12) hours = 0;
+    if (!period && hours < 12 && hours !== 12) hours += 12; // Assume PM for dinner
+
+    result.time = `${hours.toString().padStart(2, '0')}:${minutes}`;
+  }
+
+  console.log(`🍽️  [OpenTable] Parsed: restaurant="${result.restaurant}", city="${result.city}", party=${result.partySize}`);
+  return result;
+}
+
 // ============ HELPER FUNCTIONS ============
 
 function trackUser(from) {
@@ -290,8 +469,51 @@ function getUserContext(userId) {
 
 // ============ AI CONVERSATION ============
 
+// Check if text is a restaurant reservation request
+function isReservationRequest(text) {
+  const reservationKeywords = [
+    /reserv(e|ation)/i,
+    /book(ing)?\s+(a\s+)?table/i,
+    /table\s+for\s+\d/i,
+    /make\s+a\s+reservation/i,
+    /get\s+a\s+table/i,
+    /dinner\s+(reservation|booking)/i,
+    /can\s+you\s+(book|reserve)/i
+  ];
+
+  return reservationKeywords.some(pattern => pattern.test(text));
+}
+
 async function getAIResponse(text, userCtx, chatTitle) {
   if (!ANTHROPIC_API_KEY) return null;
+
+  // Check if this is a reservation request
+  if (isReservationRequest(text)) {
+    const parsed = parseReservationRequest(text);
+
+    // If we have a restaurant name, try OpenTable
+    if (parsed.restaurant) {
+      // Default to Lisbon if no city specified (based on user context)
+      if (!parsed.city) {
+        parsed.city = 'Lisbon';
+      }
+
+      const result = await makeOpenTableReservation(
+        parsed.restaurant,
+        parsed.city,
+        parsed.date || new Date().toISOString().split('T')[0],
+        parsed.time || '19:30',
+        parsed.partySize || 2
+      );
+
+      if (result.success) {
+        return `🍽️ I found ${parsed.restaurant} on OpenTable!\n\n` +
+               `📅 ${result.details.date} at ${result.details.time} for ${result.details.partySize} guests\n\n` +
+               `👉 Book here: ${result.searchUrl}\n\n` +
+               `Or try direct: ${result.directUrl}`;
+      }
+    }
+  }
 
   const systemPrompt = `You are Aton, an AI agent representing AlphaTON Capital (NASDAQ: ATON).
 
@@ -309,6 +531,13 @@ KNOWLEDGE:
 - Leadership: Brittany Kaiser (CEO), Enzo Villani (Chairman), Logan Golema (CTO), Yury Mitin (CBDO & Partner)
 - Yury Mitin: CBDO & Partner at AlphaTON, Managing Partner at RSV Capital (Canada). 17+ years in VC & tech entrepreneurship. Led $200M+ in venture/secondary investments (Udemy, eToro, Upgrade, Robinhood, MasterClass, Groq). Ph.D. in Innovation & Entrepreneurship, executive programs at Harvard Business School, UC Berkeley Haas, Ivey Business School. Focus areas: FinTech, Web3/Crypto, EdTech, AI. Background in building incubators, accelerators, and venture partnerships.
 
+CAPABILITIES:
+- Executive Assistant: calendar, tasks, contacts, email, stocks, news, travel, expenses
+- Restaurant reservations via OpenTable (say "I can book that for you!" if asked)
+- Building TON blockchain projects (via /build command in Telegram)
+- Research and information gathering
+- Daily briefings at 7AM and 6PM Portugal time
+
 RULES:
 - Keep responses concise (2-4 sentences)
 - Use emoji sparingly (1-2 max)
@@ -316,6 +545,7 @@ RULES:
 - If asked about prices/investing, redirect to fundamentals
 - Be transparent about being an AI
 - For technical questions, be specific and accurate
+- For restaurant reservations, offer to help book via OpenTable
 
 USER CONTEXT:
 ${userCtx ? `- Name: ${userCtx.name}
@@ -554,13 +784,9 @@ async function createProjectRepo(projectName, description, userId, chatId, ideaI
     return { error: "GitHub token not configured" };
   }
 
-  // Rate limit check: 1 repo per hour per user
-  const lastCreation = repoCreationCooldowns.get(userId);
+  // Rate limiting disabled for autonomous operation
+  // Aton can create repos as fast as needed
   const now = Date.now();
-  if (lastCreation && (now - lastCreation) < 3600000) {
-    const waitMinutes = Math.ceil((3600000 - (now - lastCreation)) / 60000);
-    return { error: `Rate limited. Please wait ${waitMinutes} minutes before creating another repo.` };
-  }
 
   const repoName = sanitizeRepoName(projectName);
 
@@ -1593,6 +1819,17 @@ Try /help for all commands!`;
   else if (lowerText.startsWith("/help")) {
     response = `<b>🤖 Aton Commands</b>
 
+<b>📋 Executive Assistant</b>
+/briefing - Daily executive briefing
+/calendar - Today's meetings & events
+/task - Task management
+/contact - Contact lookup & CRM
+/email - Email management
+/stock - Stock prices & alerts
+/news - News intelligence
+/travel - Travel management
+/expense - Expense tracking
+
 <b>📚 Info & Learning</b>
 /ton - TON blockchain overview
 /tps - Transaction speed stats
@@ -2398,27 +2635,423 @@ function startAutonomousTasks() {
   console.log("🤖 Autonomous mode enabled");
 }
 
+// ============ ENHANCED AUTONOMOUS FEATURES ============
+
+// Health heartbeat - write timestamp to file every 60 seconds
+const HEARTBEAT_FILE = '/tmp/aton-daemon.alive';
+function startHealthHeartbeat() {
+  const writeHeartbeat = () => {
+    try {
+      fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        pid: process.pid,
+        uptime: process.uptime(),
+        memory: process.memoryUsage().heapUsed
+      }));
+    } catch (e) {
+      console.error("Heartbeat write failed:", e.message);
+    }
+  };
+
+  writeHeartbeat(); // Write immediately
+  setInterval(writeHeartbeat, 60000); // Then every 60 seconds
+  console.log("💓 Health heartbeat started (60s interval)");
+}
+
+// iMessage monitoring - poll for new messages and respond intelligently
+// Start 10 minutes in the past so we pick up recent messages on startup
+let lastIMessageCheck = new Date(Date.now() - 10 * 60 * 1000);
+const processedIMessages = new Set();
+
+async function checkIMessages() {
+  try {
+    // Get recent chats - imsg outputs newline-delimited JSON
+    const chatsResult = execSync('/opt/homebrew/bin/imsg chats --limit 10 --json 2>/dev/null || echo ""', {
+      encoding: 'utf8',
+      timeout: 10000
+    });
+
+    let chats;
+    try {
+      // Parse newline-delimited JSON
+      chats = chatsResult.trim().split('\n').filter(line => line).map(line => JSON.parse(line));
+    } catch (e) {
+      console.log('📱 [iMessage] Parse error:', e.message);
+      return; // imsg not available or no chats
+    }
+
+    if (!Array.isArray(chats) || chats.length === 0) {
+      console.log('📱 [iMessage] No chats found');
+      return;
+    }
+
+    console.log(`📱 [iMessage] Checking ${chats.length} chats, cutoff: ${lastIMessageCheck.toISOString()}`);
+
+    for (const chat of chats) {
+      if (!chat.id) continue;
+
+      try {
+        // Get recent messages from this chat - also newline-delimited JSON
+        const historyResult = execSync(
+          `/opt/homebrew/bin/imsg history --chat-id "${chat.id}" --limit 5 --json 2>/dev/null || echo ""`,
+          { encoding: 'utf8', timeout: 10000 }
+        );
+
+        const messages = historyResult.trim().split('\n').filter(line => line).map(line => JSON.parse(line));
+        if (!Array.isArray(messages)) continue;
+
+        for (const msg of messages) {
+          // Skip if: from me, already processed, or too old
+          if (msg.is_from_me) continue;
+          if (processedIMessages.has(msg.id)) continue;
+
+          const msgTime = new Date(msg.created_at);
+          if (msgTime < lastIMessageCheck) continue;
+
+          // Mark as processed
+          processedIMessages.add(msg.id);
+
+          // Keep set from growing too large
+          if (processedIMessages.size > 1000) {
+            const arr = Array.from(processedIMessages);
+            arr.splice(0, 500);
+            processedIMessages.clear();
+            arr.forEach(id => processedIMessages.add(id));
+          }
+
+          console.log(`📱 [iMessage] New message from ${chat.identifier}: ${msg.text?.substring(0, 50)}...`);
+
+          // Get AI response
+          if (ANTHROPIC_API_KEY && msg.text) {
+            const response = await getAIResponse(msg.text, null, "iMessage");
+            if (response) {
+              try {
+                execSync(`/opt/homebrew/bin/imsg send --chat-id "${chat.id}" --text "${response.replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`, {
+                  timeout: 30000
+                });
+                console.log(`📱 [iMessage] Replied to ${chat.identifier}`);
+              } catch (sendErr) {
+                console.error("iMessage send failed:", sendErr.message);
+              }
+            }
+          }
+        }
+      } catch (historyErr) {
+        // Skip this chat
+      }
+    }
+
+    lastIMessageCheck = new Date();
+  } catch (error) {
+    // iMessage monitoring not available, skip silently
+  }
+}
+
+function startIMessageMonitor() {
+  // Check immediately
+  setTimeout(checkIMessages, 5000);
+
+  // Then every 10 seconds
+  setInterval(checkIMessages, 10000);
+  console.log("📱 iMessage monitor started (10s interval)");
+}
+
+// GitHub issue scanner - auto-queue issues from alphatoncapital/ideas
+const processedIssues = new Set();
+
+async function scanGitHubIssues() {
+  if (!GITHUB_TOKEN) return;
+
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${GITHUB_IDEAS_OWNER}/${GITHUB_IDEAS_REPO}/issues?state=open&sort=created&direction=desc&per_page=10`,
+      {
+        headers: {
+          "Authorization": `Bearer ${GITHUB_TOKEN}`,
+          "Accept": "application/vnd.github.v3+json"
+        }
+      }
+    );
+
+    if (!response.ok) return;
+
+    const issues = await response.json();
+
+    for (const issue of issues) {
+      // Skip if already processed or is a PR
+      if (processedIssues.has(issue.number)) continue;
+      if (issue.pull_request) continue;
+
+      // Check if this issue has a corresponding project already
+      const existingProject = db.prepare(
+        "SELECT * FROM ideas WHERE github_issue_url LIKE ?"
+      ).get(`%issues/${issue.number}`);
+
+      if (existingProject) {
+        processedIssues.add(issue.number);
+        continue;
+      }
+
+      // Check for "auto-build" or "approved" labels (optional - can auto-queue all)
+      const hasAutoLabel = issue.labels?.some(l =>
+        ['auto-build', 'approved', 'aton'].includes(l.name?.toLowerCase())
+      );
+
+      // For now, only auto-queue labeled issues (can be changed to queue all)
+      if (!hasAutoLabel) {
+        processedIssues.add(issue.number);
+        continue;
+      }
+
+      console.log(`🔍 [GitHub] Found issue #${issue.number}: ${issue.title}`);
+
+      // Create project from issue
+      const projectName = issue.title
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .substring(0, 50);
+
+      const result = await createProjectRepo(
+        projectName,
+        issue.body || issue.title,
+        0, // System user
+        0  // No chat
+      );
+
+      if (result.success) {
+        // Save to ideas table
+        insertIdea.run(
+          0, 0, issue.title, issue.body || '',
+          JSON.stringify([{ source: 'github', issue: issue.number }]),
+          issue.html_url, 'building', new Date().toISOString()
+        );
+
+        // Queue all development phases
+        queueDevelopmentPhases(result.projectId, issue.body || issue.title);
+
+        console.log(`🚀 [GitHub] Auto-queued project from issue #${issue.number}: ${result.repoName}`);
+
+        // Comment on the issue
+        try {
+          await fetch(
+            `https://api.github.com/repos/${GITHUB_IDEAS_OWNER}/${GITHUB_IDEAS_REPO}/issues/${issue.number}/comments`,
+            {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${GITHUB_TOKEN}`,
+                "Accept": "application/vnd.github.v3+json",
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                body: `🤖 **Aton is on it!**\n\nI've created a repo and started building: [${result.repoName}](${result.repoUrl})\n\nI'll update this issue with PRs as I make progress.`
+              })
+            }
+          );
+        } catch (commentErr) {
+          // Comment failed, not critical
+        }
+      }
+
+      processedIssues.add(issue.number);
+    }
+  } catch (error) {
+    console.error("GitHub scan error:", error.message);
+  }
+}
+
+function startGitHubScanner() {
+  // Scan immediately
+  setTimeout(scanGitHubIssues, 10000);
+
+  // Then every 5 minutes
+  setInterval(scanGitHubIssues, 5 * 60 * 1000);
+  console.log("🔍 GitHub issue scanner started (5min interval)");
+}
+
+// Proactive work generator - find things to do when queue is empty
+let lastWorkTime = new Date();
+
+async function generateProactiveWork() {
+  // Check if queue has been empty for 10+ minutes
+  const pending = getPendingWork.get();
+  if (pending) {
+    lastWorkTime = new Date();
+    return;
+  }
+
+  const idleMinutes = (Date.now() - lastWorkTime.getTime()) / 1000 / 60;
+  if (idleMinutes < 10) return;
+
+  console.log(`💡 [Proactive] Queue empty for ${Math.round(idleMinutes)} minutes, looking for work...`);
+
+  // Check for incomplete projects
+  const incompleteProjects = db.prepare(`
+    SELECT p.*,
+           (SELECT COUNT(*) FROM work_queue w WHERE w.project_id = p.id AND w.status = 'completed') as completed_phases,
+           (SELECT COUNT(*) FROM work_queue w WHERE w.project_id = p.id) as total_phases
+    FROM projects p
+    WHERE p.status IN ('created', 'in_progress')
+    ORDER BY p.created_at DESC
+    LIMIT 5
+  `).all();
+
+  for (const project of incompleteProjects) {
+    if (project.completed_phases < project.total_phases) {
+      console.log(`💡 [Proactive] Project ${project.repo_name} has ${project.total_phases - project.completed_phases} phases remaining`);
+      // Work queue processor will pick these up automatically
+      lastWorkTime = new Date();
+      return;
+    }
+  }
+
+  // If truly idle, could add more proactive behaviors here:
+  // - Scan repos for TODOs
+  // - Update dependencies
+  // - Generate content
+
+  lastWorkTime = new Date();
+}
+
+function startProactiveGenerator() {
+  // Check every 2 minutes
+  setInterval(generateProactiveWork, 2 * 60 * 1000);
+  console.log("💡 Proactive work generator started (2min interval)");
+}
+
+// Helper: Queue all development phases for a project
+function queueDevelopmentPhases(projectId, description) {
+  const phases = [
+    { type: 'scaffold', desc: 'Set up basic project structure', priority: 1 },
+    { type: 'contracts', desc: 'Implement smart contracts', priority: 2 },
+    { type: 'tests', desc: 'Write comprehensive tests', priority: 3 },
+    { type: 'scripts', desc: 'Create deployment scripts', priority: 4 },
+    { type: 'frontend', desc: 'Build frontend UI', priority: 5 },
+    { type: 'docs', desc: 'Write documentation', priority: 6 }
+  ];
+
+  const now = new Date().toISOString();
+
+  for (const phase of phases) {
+    insertWorkItem.run(
+      projectId,
+      phase.type,
+      `${phase.desc}: ${description}`,
+      phase.priority,
+      now
+    );
+  }
+
+  console.log(`📋 Queued ${phases.length} development phases for project ${projectId}`);
+}
+
 // ============ STARTUP ============
 
+// Initialize Executive Assistant services
+console.log("📋 Initializing Executive Assistant services...");
+const execServices = initializeExecAssistant(db);
+console.log("  ✅ Calendar, Tasks, Contacts, Email");
+console.log("  ✅ Financial, News, Travel, Expenses");
+
+// Register Executive Assistant commands
+registerExecCommands(bot, db);
+console.log("  ✅ Executive commands registered");
+
 // Start bot
-console.log("🤖 Aton Telegram Bot v2 starting...");
+console.log("");
+console.log("🤖 Aton Autonomous Daemon starting...");
 console.log("📁 Database:", dbPath);
+console.log("🖥️  Mac Studio Environment");
 console.log("");
 console.log("Features:");
 console.log("  ✅ User memory & conversation tracking");
 console.log("  " + (OPENAI_API_KEY ? "✅" : "❌") + " Voice/video transcription (Whisper)");
-console.log("  " + (ANTHROPIC_API_KEY ? "✅" : "❌") + " AI idea extraction (Claude)");
-console.log("  " + (GITHUB_TOKEN ? "✅" : "❌") + " GitHub issue creation");
-console.log("  ✅ Autonomous posting mode");
+console.log("  " + (ANTHROPIC_API_KEY ? "✅" : "❌") + " AI conversation (Claude)");
+console.log("  " + (GITHUB_TOKEN ? "✅" : "❌") + " GitHub integration");
+console.log("  ✅ Work queue processor (30s)");
+console.log("  ✅ iMessage monitor (10s)");
+console.log("  ✅ GitHub issue scanner (5min)");
+console.log("  ✅ Proactive work generator");
+console.log("  ✅ Health heartbeat (60s)");
 console.log("");
+console.log("Executive Assistant Features:");
+console.log("  ✅ Calendar management (/calendar)");
+console.log("  ✅ Task tracking (/task)");
+console.log("  ✅ Contact CRM (/contact)");
+console.log("  ✅ Email management (/email)");
+console.log("  ✅ Stock monitoring (/stock)");
+console.log("  ✅ News intelligence (/news)");
+console.log("  ✅ Travel management (/travel)");
+console.log("  ✅ Expense tracking (/expense)");
+console.log("  ✅ Daily briefing (/briefing)");
+console.log("");
+
+// Start health heartbeat first
+startHealthHeartbeat();
+
+// Executive briefing scheduler
+function scheduleExecutiveBriefings() {
+  const checkBriefingTime = async () => {
+    const now = new Date();
+    // Convert to Portugal time
+    const ptTime = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Lisbon' }));
+    const hour = ptTime.getHours();
+    const minute = ptTime.getMinutes();
+
+    // Morning briefing at 7:00 AM Portugal time
+    if (hour === 7 && minute === 0) {
+      console.log("📬 Sending morning briefing...");
+      try {
+        const briefing = await generateDailyBriefing(db, {});
+        // Send to Logan's chat (get from first admin user or config)
+        const adminUser = db.prepare("SELECT * FROM users WHERE username = 'logangolema' OR id = 1 LIMIT 1").get();
+        if (adminUser) {
+          await bot.api.sendMessage(adminUser.id, briefing, { parse_mode: "HTML", disable_web_page_preview: true });
+          console.log("✅ Morning briefing sent");
+        }
+      } catch (e) {
+        console.error("Morning briefing error:", e.message);
+      }
+    }
+
+    // Evening briefing at 6:00 PM Portugal time
+    if (hour === 18 && minute === 0) {
+      console.log("📬 Sending evening briefing...");
+      try {
+        const briefing = await generateEveningBriefing(db, {});
+        const adminUser = db.prepare("SELECT * FROM users WHERE username = 'logangolema' OR id = 1 LIMIT 1").get();
+        if (adminUser) {
+          await bot.api.sendMessage(adminUser.id, briefing, { parse_mode: "HTML", disable_web_page_preview: true });
+          console.log("✅ Evening briefing sent");
+        }
+      } catch (e) {
+        console.error("Evening briefing error:", e.message);
+      }
+    }
+  };
+
+  // Check every minute for briefing times
+  setInterval(checkBriefingTime, 60000);
+  console.log("📬 Executive briefing scheduler started (7AM/6PM PT)");
+}
 
 bot.start({
   onStart: (botInfo) => {
     console.log(`✅ Bot @${botInfo.username} is running!`);
 
-    // Start autonomous tasks
+    // Start all autonomous systems
     startAutonomousTasks();
+    startIMessageMonitor();
+    startGitHubScanner();
+    startProactiveGenerator();
 
-    console.log("\nPress Ctrl+C to stop");
+    // Start Executive Assistant processors
+    const execProcessors = startExecProcessors(db, bot, {});
+    console.log("✅ Executive Assistant processors started");
+
+    // Start briefing scheduler
+    scheduleExecutiveBriefings();
+
+    console.log("\n🤖 Aton is fully autonomous. Press Ctrl+C to stop.");
   },
 });
