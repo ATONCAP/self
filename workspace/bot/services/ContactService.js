@@ -3,84 +3,56 @@
  *
  * Contact and CRM management service for the executive assistant bot.
  * Handles contact storage, interaction logging, and relationship tracking.
+ *
+ * Uses better-sqlite3 synchronous API.
  */
 
 /**
  * Initialize database tables for contacts and interactions
- * @param {Object} db - SQLite database instance
- * @returns {Promise<void>}
+ * @param {Object} db - better-sqlite3 database instance
  */
-async function initTables(db) {
-  return new Promise((resolve, reject) => {
-    db.serialize(() => {
-      // Create contacts table
-      db.run(`
-        CREATE TABLE IF NOT EXISTS contacts (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL,
-          company TEXT,
-          title TEXT,
-          email TEXT,
-          phone TEXT,
-          linkedin TEXT,
-          notes TEXT,
-          vip BOOLEAN DEFAULT 0,
-          birthday DATE,
-          last_contact DATETIME,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-      `, (err) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-      });
+function initTables(db) {
+  // Create contacts table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      company TEXT,
+      title TEXT,
+      email TEXT,
+      phone TEXT,
+      linkedin TEXT,
+      notes TEXT,
+      vip BOOLEAN DEFAULT 0,
+      birthday DATE,
+      last_contact DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
 
-      // Create contact_interactions table
-      db.run(`
-        CREATE TABLE IF NOT EXISTS contact_interactions (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          contact_id INTEGER NOT NULL,
-          type TEXT NOT NULL,
-          summary TEXT,
-          date DATETIME NOT NULL,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (contact_id) REFERENCES contacts(id)
-        )
-      `, (err) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-      });
+  // Create contact_interactions table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS contact_interactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contact_id INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      summary TEXT,
+      date DATETIME NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (contact_id) REFERENCES contacts(id)
+    )
+  `);
 
-      // Create indexes for better query performance
-      db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name)`, (err) => {
-        if (err) console.error('Error creating name index:', err);
-      });
-
-      db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company)`, (err) => {
-        if (err) console.error('Error creating company index:', err);
-      });
-
-      db.run(`CREATE INDEX IF NOT EXISTS idx_contacts_vip ON contacts(vip)`, (err) => {
-        if (err) console.error('Error creating vip index:', err);
-      });
-
-      db.run(`CREATE INDEX IF NOT EXISTS idx_interactions_contact ON contact_interactions(contact_id)`, (err) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        resolve();
-      });
-    });
-  });
+  // Create indexes for better query performance
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_contacts_vip ON contacts(vip)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_interactions_contact ON contact_interactions(contact_id)`);
 }
 
 /**
  * Add a new contact to the database
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {Object} contactData - Contact information
  * @param {string} contactData.name - Contact name (required)
  * @param {string} [contactData.company] - Company name
@@ -91,162 +63,125 @@ async function initTables(db) {
  * @param {string} [contactData.notes] - Additional notes
  * @param {boolean} [contactData.vip] - VIP status
  * @param {string} [contactData.birthday] - Birthday (YYYY-MM-DD format)
- * @returns {Promise<{id: number, name: string}>}
+ * @returns {{id: number, name: string}}
  */
-async function addContact(db, { name, company, title, email, phone, linkedin, notes, vip, birthday }) {
+function addContact(db, { name, company, title, email, phone, linkedin, notes, vip, birthday }) {
   if (!name || typeof name !== 'string' || name.trim() === '') {
     throw new Error('Contact name is required');
   }
 
-  return new Promise((resolve, reject) => {
-    const sql = `
-      INSERT INTO contacts (name, company, title, email, phone, linkedin, notes, vip, birthday)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
+  const sql = `
+    INSERT INTO contacts (name, company, title, email, phone, linkedin, notes, vip, birthday)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `;
 
-    const params = [
-      name.trim(),
-      company || null,
-      title || null,
-      email || null,
-      phone || null,
-      linkedin || null,
-      notes || null,
-      vip ? 1 : 0,
-      birthday || null
-    ];
+  const params = [
+    name.trim(),
+    company || null,
+    title || null,
+    email || null,
+    phone || null,
+    linkedin || null,
+    notes || null,
+    vip ? 1 : 0,
+    birthday || null
+  ];
 
-    db.run(sql, params, function(err) {
-      if (err) {
-        reject(new Error(`Failed to add contact: ${err.message}`));
-        return;
-      }
-      resolve({ id: this.lastID, name: name.trim() });
-    });
-  });
+  const stmt = db.prepare(sql);
+  const result = stmt.run(...params);
+
+  return { id: result.lastInsertRowid, name: name.trim() };
 }
 
 /**
  * Get a single contact with recent interactions
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} contactId - Contact ID
- * @returns {Promise<Object|null>}
+ * @returns {Object|null}
  */
-async function getContact(db, contactId) {
+function getContact(db, contactId) {
   if (!contactId || typeof contactId !== 'number') {
     throw new Error('Valid contact ID is required');
   }
 
-  return new Promise((resolve, reject) => {
-    const contactSql = `SELECT * FROM contacts WHERE id = ?`;
+  const contactStmt = db.prepare(`SELECT * FROM contacts WHERE id = ?`);
+  const contact = contactStmt.get(contactId);
 
-    db.get(contactSql, [contactId], (err, contact) => {
-      if (err) {
-        reject(new Error(`Failed to get contact: ${err.message}`));
-        return;
-      }
+  if (!contact) {
+    return null;
+  }
 
-      if (!contact) {
-        resolve(null);
-        return;
-      }
+  // Get recent interactions
+  const interactionsStmt = db.prepare(`
+    SELECT * FROM contact_interactions
+    WHERE contact_id = ?
+    ORDER BY date DESC
+    LIMIT 5
+  `);
+  const interactions = interactionsStmt.all(contactId);
 
-      // Get recent interactions
-      const interactionsSql = `
-        SELECT * FROM contact_interactions
-        WHERE contact_id = ?
-        ORDER BY date DESC
-        LIMIT 5
-      `;
+  contact.recentInteractions = interactions || [];
+  contact.vip = Boolean(contact.vip);
 
-      db.all(interactionsSql, [contactId], (err, interactions) => {
-        if (err) {
-          reject(new Error(`Failed to get interactions: ${err.message}`));
-          return;
-        }
-
-        contact.recentInteractions = interactions || [];
-        contact.vip = Boolean(contact.vip);
-        resolve(contact);
-      });
-    });
-  });
+  return contact;
 }
 
 /**
  * Search contacts by name, company, or email
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {string} searchTerm - Search term
- * @returns {Promise<Array>}
+ * @returns {Array}
  */
-async function findContacts(db, searchTerm) {
+function findContacts(db, searchTerm) {
   if (!searchTerm || typeof searchTerm !== 'string') {
     return [];
   }
 
   const term = `%${searchTerm.trim()}%`;
 
-  return new Promise((resolve, reject) => {
-    const sql = `
-      SELECT * FROM contacts
-      WHERE name LIKE ? OR company LIKE ? OR email LIKE ?
-      ORDER BY vip DESC, name ASC
-      LIMIT 50
-    `;
+  const stmt = db.prepare(`
+    SELECT * FROM contacts
+    WHERE name LIKE ? OR company LIKE ? OR email LIKE ?
+    ORDER BY vip DESC, name ASC
+    LIMIT 50
+  `);
 
-    db.all(sql, [term, term, term], (err, contacts) => {
-      if (err) {
-        reject(new Error(`Failed to search contacts: ${err.message}`));
-        return;
-      }
+  const contacts = stmt.all(term, term, term);
 
-      const result = (contacts || []).map(c => ({
-        ...c,
-        vip: Boolean(c.vip)
-      }));
-
-      resolve(result);
-    });
-  });
+  return (contacts || []).map(c => ({
+    ...c,
+    vip: Boolean(c.vip)
+  }));
 }
 
 /**
  * Get all VIP contacts
- * @param {Object} db - SQLite database instance
- * @returns {Promise<Array>}
+ * @param {Object} db - better-sqlite3 database instance
+ * @returns {Array}
  */
-async function getVIPContacts(db) {
-  return new Promise((resolve, reject) => {
-    const sql = `
-      SELECT * FROM contacts
-      WHERE vip = 1
-      ORDER BY name ASC
-    `;
+function getVIPContacts(db) {
+  const stmt = db.prepare(`
+    SELECT * FROM contacts
+    WHERE vip = 1
+    ORDER BY name ASC
+  `);
 
-    db.all(sql, [], (err, contacts) => {
-      if (err) {
-        reject(new Error(`Failed to get VIP contacts: ${err.message}`));
-        return;
-      }
+  const contacts = stmt.all();
 
-      const result = (contacts || []).map(c => ({
-        ...c,
-        vip: true
-      }));
-
-      resolve(result);
-    });
-  });
+  return (contacts || []).map(c => ({
+    ...c,
+    vip: true
+  }));
 }
 
 /**
  * Update contact details
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} contactId - Contact ID
  * @param {Object} updates - Fields to update
- * @returns {Promise<boolean>}
+ * @returns {boolean}
  */
-async function updateContact(db, contactId, updates) {
+function updateContact(db, contactId, updates) {
   if (!contactId || typeof contactId !== 'number') {
     throw new Error('Valid contact ID is required');
   }
@@ -276,63 +211,46 @@ async function updateContact(db, contactId, updates) {
 
   params.push(contactId);
 
-  return new Promise((resolve, reject) => {
-    const sql = `UPDATE contacts SET ${updateFields.join(', ')} WHERE id = ?`;
+  const sql = `UPDATE contacts SET ${updateFields.join(', ')} WHERE id = ?`;
+  const stmt = db.prepare(sql);
+  const result = stmt.run(...params);
 
-    db.run(sql, params, function(err) {
-      if (err) {
-        reject(new Error(`Failed to update contact: ${err.message}`));
-        return;
-      }
-      resolve(this.changes > 0);
-    });
-  });
+  return result.changes > 0;
 }
 
 /**
  * Delete a contact and their interactions
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} contactId - Contact ID
- * @returns {Promise<boolean>}
+ * @returns {boolean}
  */
-async function deleteContact(db, contactId) {
+function deleteContact(db, contactId) {
   if (!contactId || typeof contactId !== 'number') {
     throw new Error('Valid contact ID is required');
   }
 
-  return new Promise((resolve, reject) => {
-    db.serialize(() => {
-      // Delete interactions first
-      db.run(`DELETE FROM contact_interactions WHERE contact_id = ?`, [contactId], (err) => {
-        if (err) {
-          reject(new Error(`Failed to delete interactions: ${err.message}`));
-          return;
-        }
-      });
+  // Delete interactions first
+  const deleteInteractionsStmt = db.prepare(`DELETE FROM contact_interactions WHERE contact_id = ?`);
+  deleteInteractionsStmt.run(contactId);
 
-      // Delete contact
-      db.run(`DELETE FROM contacts WHERE id = ?`, [contactId], function(err) {
-        if (err) {
-          reject(new Error(`Failed to delete contact: ${err.message}`));
-          return;
-        }
-        resolve(this.changes > 0);
-      });
-    });
-  });
+  // Delete contact
+  const deleteContactStmt = db.prepare(`DELETE FROM contacts WHERE id = ?`);
+  const result = deleteContactStmt.run(contactId);
+
+  return result.changes > 0;
 }
 
 /**
  * Log an interaction with a contact
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} contactId - Contact ID
  * @param {Object} interaction - Interaction details
  * @param {string} interaction.type - Type of interaction (meeting, email, call, message)
  * @param {string} [interaction.summary] - Summary of the interaction
  * @param {string} [interaction.date] - Date of interaction (defaults to now)
- * @returns {Promise<{id: number}>}
+ * @returns {{id: number}}
  */
-async function logInteraction(db, contactId, { type, summary, date }) {
+function logInteraction(db, contactId, { type, summary, date }) {
   if (!contactId || typeof contactId !== 'number') {
     throw new Error('Valid contact ID is required');
   }
@@ -344,138 +262,104 @@ async function logInteraction(db, contactId, { type, summary, date }) {
 
   const interactionDate = date || new Date().toISOString();
 
-  return new Promise((resolve, reject) => {
-    db.serialize(() => {
-      // Insert interaction
-      const insertSql = `
-        INSERT INTO contact_interactions (contact_id, type, summary, date)
-        VALUES (?, ?, ?, ?)
-      `;
+  // Insert interaction
+  const insertStmt = db.prepare(`
+    INSERT INTO contact_interactions (contact_id, type, summary, date)
+    VALUES (?, ?, ?, ?)
+  `);
+  const result = insertStmt.run(contactId, type.toLowerCase(), summary || null, interactionDate);
+  const interactionId = result.lastInsertRowid;
 
-      db.run(insertSql, [contactId, type.toLowerCase(), summary || null, interactionDate], function(err) {
-        if (err) {
-          reject(new Error(`Failed to log interaction: ${err.message}`));
-          return;
-        }
+  // Update last_contact on the contact
+  try {
+    const updateStmt = db.prepare(`UPDATE contacts SET last_contact = ? WHERE id = ?`);
+    updateStmt.run(interactionDate, contactId);
+  } catch (err) {
+    console.error('Failed to update last_contact:', err);
+  }
 
-        const interactionId = this.lastID;
-
-        // Update last_contact on the contact
-        db.run(`UPDATE contacts SET last_contact = ? WHERE id = ?`, [interactionDate, contactId], (err) => {
-          if (err) {
-            console.error('Failed to update last_contact:', err);
-          }
-          resolve({ id: interactionId });
-        });
-      });
-    });
-  });
+  return { id: interactionId };
 }
 
 /**
  * Get interaction history for a contact
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} contactId - Contact ID
  * @param {number} [limit=20] - Maximum number of interactions to return
- * @returns {Promise<Array>}
+ * @returns {Array}
  */
-async function getInteractionHistory(db, contactId, limit = 20) {
+function getInteractionHistory(db, contactId, limit = 20) {
   if (!contactId || typeof contactId !== 'number') {
     throw new Error('Valid contact ID is required');
   }
 
-  return new Promise((resolve, reject) => {
-    const sql = `
-      SELECT * FROM contact_interactions
-      WHERE contact_id = ?
-      ORDER BY date DESC
-      LIMIT ?
-    `;
+  const stmt = db.prepare(`
+    SELECT * FROM contact_interactions
+    WHERE contact_id = ?
+    ORDER BY date DESC
+    LIMIT ?
+  `);
 
-    db.all(sql, [contactId, limit], (err, interactions) => {
-      if (err) {
-        reject(new Error(`Failed to get interaction history: ${err.message}`));
-        return;
-      }
-      resolve(interactions || []);
-    });
-  });
+  const interactions = stmt.all(contactId, limit);
+  return interactions || [];
 }
 
 /**
  * Get contacts with upcoming birthdays
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} [daysAhead=30] - Number of days to look ahead
- * @returns {Promise<Array>}
+ * @returns {Array}
  */
-async function getUpcomingBirthdays(db, daysAhead = 30) {
-  return new Promise((resolve, reject) => {
-    // SQLite date handling for birthdays - compare month and day
-    const sql = `
-      SELECT *,
-        CASE
-          WHEN strftime('%m-%d', birthday) >= strftime('%m-%d', 'now')
-          THEN julianday(strftime('%Y', 'now') || '-' || strftime('%m-%d', birthday)) - julianday('now')
-          ELSE julianday(strftime('%Y', 'now', '+1 year') || '-' || strftime('%m-%d', birthday)) - julianday('now')
-        END as days_until
-      FROM contacts
-      WHERE birthday IS NOT NULL
-      HAVING days_until >= 0 AND days_until <= ?
-      ORDER BY days_until ASC
-    `;
+function getUpcomingBirthdays(db, daysAhead = 30) {
+  // SQLite date handling for birthdays - compare month and day
+  const stmt = db.prepare(`
+    SELECT *,
+      CASE
+        WHEN strftime('%m-%d', birthday) >= strftime('%m-%d', 'now')
+        THEN julianday(strftime('%Y', 'now') || '-' || strftime('%m-%d', birthday)) - julianday('now')
+        ELSE julianday(strftime('%Y', 'now', '+1 year') || '-' || strftime('%m-%d', birthday)) - julianday('now')
+      END as days_until
+    FROM contacts
+    WHERE birthday IS NOT NULL
+    HAVING days_until >= 0 AND days_until <= ?
+    ORDER BY days_until ASC
+  `);
 
-    db.all(sql, [daysAhead], (err, contacts) => {
-      if (err) {
-        reject(new Error(`Failed to get upcoming birthdays: ${err.message}`));
-        return;
-      }
+  const contacts = stmt.all(daysAhead);
 
-      const result = (contacts || []).map(c => ({
-        ...c,
-        vip: Boolean(c.vip),
-        days_until: Math.round(c.days_until)
-      }));
-
-      resolve(result);
-    });
-  });
+  return (contacts || []).map(c => ({
+    ...c,
+    vip: Boolean(c.vip),
+    days_until: Math.round(c.days_until)
+  }));
 }
 
 /**
  * Get contacts not contacted within specified days
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} [days=30] - Number of days threshold
- * @returns {Promise<Array>}
+ * @returns {Array}
  */
-async function getContactsNotContactedSince(db, days = 30) {
-  return new Promise((resolve, reject) => {
-    const sql = `
-      SELECT *,
-        CASE
-          WHEN last_contact IS NULL THEN 9999
-          ELSE julianday('now') - julianday(last_contact)
-        END as days_since_contact
-      FROM contacts
-      WHERE last_contact IS NULL
-        OR julianday('now') - julianday(last_contact) > ?
-      ORDER BY vip DESC, days_since_contact DESC
-    `;
+function getContactsNotContactedSince(db, days = 30) {
+  const stmt = db.prepare(`
+    SELECT *,
+      CASE
+        WHEN last_contact IS NULL THEN 9999
+        ELSE julianday('now') - julianday(last_contact)
+      END as days_since_contact
+    FROM contacts
+    WHERE last_contact IS NULL
+      OR julianday('now') - julianday(last_contact) > ?
+    ORDER BY vip DESC, days_since_contact DESC
+  `);
 
-    db.all(sql, [days], (err, contacts) => {
-      if (err) {
-        reject(new Error(`Failed to get stale contacts: ${err.message}`));
-        return;
-      }
+  const contacts = stmt.all(days);
 
-      const result = (contacts || []).map(c => ({
-        ...c,
-        vip: Boolean(c.vip),
-        days_since_contact: c.days_since_contact === 9999 ? null : Math.round(c.days_since_contact)
-      }));
-
-      resolve(result);
-    });
-  });
+  return (contacts || []).map(c => ({
+    ...c,
+    vip: Boolean(c.vip),
+    days_since_contact: c.days_since_contact === 9999 ? null : Math.round(c.days_since_contact)
+  }));
 }
 
 /**

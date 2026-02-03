@@ -4,6 +4,8 @@
  * Financial monitoring service for executive dashboard.
  * Handles stock quotes, price alerts, and SEC filing monitoring
  * for ATON (NASDAQ: ATON) and competitor analysis.
+ *
+ * Uses better-sqlite3 synchronous API.
  */
 
 const https = require('https');
@@ -29,10 +31,9 @@ const FILING_TYPE_DESCRIPTIONS = {
 
 /**
  * Initialize database tables for financial monitoring
- * @param {Object} db - SQLite database instance
- * @returns {Promise<void>}
+ * @param {Object} db - better-sqlite3 database instance
  */
-async function initTables(db) {
+function initTables(db) {
   const tables = [
     `CREATE TABLE IF NOT EXISTS financial_alerts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,18 +74,13 @@ async function initTables(db) {
     'CREATE INDEX IF NOT EXISTS idx_filings_notified ON sec_filings(notified)'
   ];
 
-  return new Promise((resolve, reject) => {
-    db.serialize(() => {
-      for (const sql of [...tables, ...indexes]) {
-        db.run(sql, (err) => {
-          if (err) {
-            console.error('Error creating table/index:', err.message);
-          }
-        });
-      }
-      resolve();
-    });
-  });
+  for (const sql of [...tables, ...indexes]) {
+    try {
+      db.exec(sql);
+    } catch (err) {
+      console.error('Error creating table/index:', err.message);
+    }
+  }
 }
 
 /**
@@ -176,183 +172,137 @@ async function getStockQuote(symbol, apiKey = null) {
 
 /**
  * Cache a stock price in the database
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {string} symbol - Stock symbol
  * @param {number} price - Current price
  * @param {number} changePercent - Percent change
  * @param {number} volume - Trading volume
- * @returns {Promise<number>} Inserted row ID
+ * @returns {number} Inserted row ID
  */
 function cacheStockPrice(db, symbol, price, changePercent, volume) {
-  return new Promise((resolve, reject) => {
-    const sql = `INSERT INTO stock_prices (symbol, price, change_percent, volume) VALUES (?, ?, ?, ?)`;
-    db.run(sql, [symbol.toUpperCase(), price, changePercent, volume], function(err) {
-      if (err) {
-        reject(new Error(`Failed to cache stock price: ${err.message}`));
-      } else {
-        resolve(this.lastID);
-      }
-    });
-  });
+  const sql = `INSERT INTO stock_prices (symbol, price, change_percent, volume) VALUES (?, ?, ?, ?)`;
+  const stmt = db.prepare(sql);
+  const result = stmt.run(symbol.toUpperCase(), price, changePercent, volume);
+  return result.lastInsertRowid;
 }
 
 /**
  * Get the most recent cached price for a symbol
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {string} symbol - Stock symbol
- * @returns {Promise<Object|null>} Latest price data or null
+ * @returns {Object|null} Latest price data or null
  */
 function getLatestPrice(db, symbol) {
-  return new Promise((resolve, reject) => {
-    const sql = `SELECT * FROM stock_prices WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1`;
-    db.get(sql, [symbol.toUpperCase()], (err, row) => {
-      if (err) {
-        reject(new Error(`Failed to get latest price: ${err.message}`));
-      } else {
-        resolve(row || null);
-      }
-    });
-  });
+  const sql = `SELECT * FROM stock_prices WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1`;
+  const stmt = db.prepare(sql);
+  const row = stmt.get(symbol.toUpperCase());
+  return row || null;
 }
 
 /**
  * Add a new price or filing alert
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {Object} options - Alert options
  * @param {string} options.symbol - Stock symbol
  * @param {string} options.alertType - Alert type (price_above, price_below, filing, earnings)
  * @param {number} [options.threshold] - Price threshold (for price alerts)
- * @returns {Promise<number>} Inserted alert ID
+ * @returns {number} Inserted alert ID
  */
 function addAlert(db, { symbol, alertType, threshold }) {
-  return new Promise((resolve, reject) => {
-    const validTypes = ['price_above', 'price_below', 'filing', 'earnings'];
-    if (!validTypes.includes(alertType)) {
-      reject(new Error(`Invalid alert type: ${alertType}. Must be one of: ${validTypes.join(', ')}`));
-      return;
-    }
+  const validTypes = ['price_above', 'price_below', 'filing', 'earnings'];
+  if (!validTypes.includes(alertType)) {
+    throw new Error(`Invalid alert type: ${alertType}. Must be one of: ${validTypes.join(', ')}`);
+  }
 
-    if ((alertType === 'price_above' || alertType === 'price_below') && threshold == null) {
-      reject(new Error('Price alerts require a threshold value'));
-      return;
-    }
+  if ((alertType === 'price_above' || alertType === 'price_below') && threshold == null) {
+    throw new Error('Price alerts require a threshold value');
+  }
 
-    const sql = `INSERT INTO financial_alerts (symbol, alert_type, threshold) VALUES (?, ?, ?)`;
-    db.run(sql, [symbol.toUpperCase(), alertType, threshold], function(err) {
-      if (err) {
-        reject(new Error(`Failed to add alert: ${err.message}`));
-      } else {
-        resolve(this.lastID);
-      }
-    });
-  });
+  const sql = `INSERT INTO financial_alerts (symbol, alert_type, threshold) VALUES (?, ?, ?)`;
+  const stmt = db.prepare(sql);
+  const result = stmt.run(symbol.toUpperCase(), alertType, threshold);
+  return result.lastInsertRowid;
 }
 
 /**
  * Get all alerts for a symbol
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {string} [symbol] - Stock symbol (optional, returns all if not provided)
- * @returns {Promise<Array>} Array of alerts
+ * @returns {Array} Array of alerts
  */
 function getAlerts(db, symbol = null) {
-  return new Promise((resolve, reject) => {
-    let sql = 'SELECT * FROM financial_alerts WHERE triggered = 0';
-    const params = [];
+  let sql = 'SELECT * FROM financial_alerts WHERE triggered = 0';
+  const params = [];
 
-    if (symbol) {
-      sql += ' AND symbol = ?';
-      params.push(symbol.toUpperCase());
-    }
+  if (symbol) {
+    sql += ' AND symbol = ?';
+    params.push(symbol.toUpperCase());
+  }
 
-    sql += ' ORDER BY created_at DESC';
+  sql += ' ORDER BY created_at DESC';
 
-    db.all(sql, params, (err, rows) => {
-      if (err) {
-        reject(new Error(`Failed to get alerts: ${err.message}`));
-      } else {
-        resolve(rows || []);
-      }
-    });
-  });
+  const stmt = db.prepare(sql);
+  const rows = stmt.all(...params);
+  return rows || [];
 }
 
 /**
  * Check if any alerts should fire based on current price
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {string} symbol - Stock symbol
  * @param {number} currentPrice - Current stock price
- * @returns {Promise<Array>} Array of triggered alerts
+ * @returns {Array} Array of triggered alerts
  */
 function checkAlerts(db, symbol, currentPrice) {
-  return new Promise((resolve, reject) => {
-    const sql = `
-      SELECT * FROM financial_alerts
-      WHERE symbol = ?
-        AND triggered = 0
-        AND alert_type IN ('price_above', 'price_below')
-    `;
+  const sql = `
+    SELECT * FROM financial_alerts
+    WHERE symbol = ?
+      AND triggered = 0
+      AND alert_type IN ('price_above', 'price_below')
+  `;
 
-    db.all(sql, [symbol.toUpperCase()], (err, rows) => {
-      if (err) {
-        reject(new Error(`Failed to check alerts: ${err.message}`));
-        return;
-      }
+  const stmt = db.prepare(sql);
+  const rows = stmt.all(symbol.toUpperCase());
 
-      const triggeredAlerts = (rows || []).filter(alert => {
-        if (alert.alert_type === 'price_above' && currentPrice >= alert.threshold) {
-          return true;
-        }
-        if (alert.alert_type === 'price_below' && currentPrice <= alert.threshold) {
-          return true;
-        }
-        return false;
-      });
-
-      resolve(triggeredAlerts);
-    });
+  const triggeredAlerts = (rows || []).filter(alert => {
+    if (alert.alert_type === 'price_above' && currentPrice >= alert.threshold) {
+      return true;
+    }
+    if (alert.alert_type === 'price_below' && currentPrice <= alert.threshold) {
+      return true;
+    }
+    return false;
   });
+
+  return triggeredAlerts;
 }
 
 /**
  * Mark an alert as triggered
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} alertId - Alert ID to mark as triggered
- * @returns {Promise<void>}
  */
 function markAlertTriggered(db, alertId) {
-  return new Promise((resolve, reject) => {
-    const sql = `UPDATE financial_alerts SET triggered = 1, triggered_at = CURRENT_TIMESTAMP WHERE id = ?`;
-    db.run(sql, [alertId], function(err) {
-      if (err) {
-        reject(new Error(`Failed to mark alert triggered: ${err.message}`));
-      } else if (this.changes === 0) {
-        reject(new Error(`Alert not found: ${alertId}`));
-      } else {
-        resolve();
-      }
-    });
-  });
+  const sql = `UPDATE financial_alerts SET triggered = 1, triggered_at = CURRENT_TIMESTAMP WHERE id = ?`;
+  const stmt = db.prepare(sql);
+  const result = stmt.run(alertId);
+  if (result.changes === 0) {
+    throw new Error(`Alert not found: ${alertId}`);
+  }
 }
 
 /**
  * Delete an alert
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} alertId - Alert ID to delete
- * @returns {Promise<void>}
  */
 function deleteAlert(db, alertId) {
-  return new Promise((resolve, reject) => {
-    const sql = `DELETE FROM financial_alerts WHERE id = ?`;
-    db.run(sql, [alertId], function(err) {
-      if (err) {
-        reject(new Error(`Failed to delete alert: ${err.message}`));
-      } else if (this.changes === 0) {
-        reject(new Error(`Alert not found: ${alertId}`));
-      } else {
-        resolve();
-      }
-    });
-  });
+  const sql = `DELETE FROM financial_alerts WHERE id = ?`;
+  const stmt = db.prepare(sql);
+  const result = stmt.run(alertId);
+  if (result.changes === 0) {
+    throw new Error(`Alert not found: ${alertId}`);
+  }
 }
 
 /**
@@ -377,83 +327,62 @@ async function checkSECFilings(symbol) {
 
 /**
  * Cache SEC filings in the database
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {Array} filings - Array of filing objects
- * @returns {Promise<number>} Number of filings cached
+ * @returns {number} Number of filings cached
  */
 function cacheFilings(db, filings) {
-  return new Promise((resolve, reject) => {
-    if (!filings || filings.length === 0) {
-      resolve(0);
-      return;
+  if (!filings || filings.length === 0) {
+    return 0;
+  }
+
+  const sql = `
+    INSERT OR IGNORE INTO sec_filings (symbol, filing_type, title, url, filed_date)
+    VALUES (?, ?, ?, ?, ?)
+  `;
+  const stmt = db.prepare(sql);
+
+  let cached = 0;
+  for (const filing of filings) {
+    const result = stmt.run(
+      filing.symbol?.toUpperCase(),
+      filing.filingType,
+      filing.title,
+      filing.url,
+      filing.filedDate
+    );
+    if (result.changes > 0) {
+      cached++;
     }
+  }
 
-    let cached = 0;
-    const sql = `
-      INSERT OR IGNORE INTO sec_filings (symbol, filing_type, title, url, filed_date)
-      VALUES (?, ?, ?, ?, ?)
-    `;
-
-    db.serialize(() => {
-      for (const filing of filings) {
-        db.run(sql, [
-          filing.symbol?.toUpperCase(),
-          filing.filingType,
-          filing.title,
-          filing.url,
-          filing.filedDate
-        ], function(err) {
-          if (!err && this.changes > 0) {
-            cached++;
-          }
-        });
-      }
-
-      // Use a callback to resolve after all inserts
-      db.run('SELECT 1', [], () => {
-        resolve(cached);
-      });
-    });
-  });
+  return cached;
 }
 
 /**
  * Get filings that have not been notified
- * @param {Object} db - SQLite database instance
- * @returns {Promise<Array>} Array of unnotified filings
+ * @param {Object} db - better-sqlite3 database instance
+ * @returns {Array} Array of unnotified filings
  */
 function getUnnotifiedFilings(db) {
-  return new Promise((resolve, reject) => {
-    const sql = `SELECT * FROM sec_filings WHERE notified = 0 ORDER BY filed_date DESC`;
-    db.all(sql, [], (err, rows) => {
-      if (err) {
-        reject(new Error(`Failed to get unnotified filings: ${err.message}`));
-      } else {
-        resolve(rows || []);
-      }
-    });
-  });
+  const sql = `SELECT * FROM sec_filings WHERE notified = 0 ORDER BY filed_date DESC`;
+  const stmt = db.prepare(sql);
+  const rows = stmt.all();
+  return rows || [];
 }
 
 /**
  * Mark a filing as notified
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {number} filingId - Filing ID to mark as notified
- * @returns {Promise<void>}
  */
 function markFilingNotified(db, filingId) {
-  return new Promise((resolve, reject) => {
-    const sql = `UPDATE sec_filings SET notified = 1 WHERE id = ?`;
-    db.run(sql, [filingId], function(err) {
-      if (err) {
-        reject(new Error(`Failed to mark filing notified: ${err.message}`));
-      } else if (this.changes === 0) {
-        reject(new Error(`Filing not found: ${filingId}`));
-      } else {
-        resolve();
-      }
-    });
-  });
+  const sql = `UPDATE sec_filings SET notified = 1 WHERE id = ?`;
+  const stmt = db.prepare(sql);
+  const result = stmt.run(filingId);
+  if (result.changes === 0) {
+    throw new Error(`Filing not found: ${filingId}`);
+  }
 }
 
 /**
@@ -548,7 +477,7 @@ function formatFilingsForDisplay(filings) {
 
 /**
  * Generate a market briefing for watched symbols
- * @param {Object} db - SQLite database instance
+ * @param {Object} db - better-sqlite3 database instance
  * @param {Array} [symbols] - Symbols to include (defaults to DEFAULT_SYMBOLS + COMPETITOR_SYMBOLS)
  * @param {string} [apiKey] - Alpha Vantage API key
  * @returns {Promise<string>} Formatted briefing
@@ -575,7 +504,7 @@ async function generateMarketBriefing(db, symbols = null, apiKey = null) {
 
       // If API failed, try to get cached data
       if (quote.error) {
-        const cached = await getLatestPrice(db, symbol);
+        const cached = getLatestPrice(db, symbol);
         if (cached) {
           quote = {
             symbol: cached.symbol,
@@ -587,7 +516,7 @@ async function generateMarketBriefing(db, symbols = null, apiKey = null) {
         }
       } else {
         // Cache successful quote
-        await cacheStockPrice(db, quote.symbol, quote.price, quote.changePercent, quote.volume);
+        cacheStockPrice(db, quote.symbol, quote.price, quote.changePercent, quote.volume);
       }
 
       briefing += formatQuoteForDisplay(quote);
@@ -597,12 +526,12 @@ async function generateMarketBriefing(db, symbols = null, apiKey = null) {
       briefing += '\n\n';
 
       // Check for alerts
-      const triggeredAlerts = await checkAlerts(db, symbol, quote.price);
+      const triggeredAlerts = checkAlerts(db, symbol, quote.price);
       if (triggeredAlerts.length > 0) {
         briefing += `⚠️ <b>ALERTS TRIGGERED:</b>\n`;
         for (const alert of triggeredAlerts) {
           briefing += `  • ${alert.alert_type}: ${formatPrice(alert.threshold)}\n`;
-          await markAlertTriggered(db, alert.id);
+          markAlertTriggered(db, alert.id);
         }
         briefing += '\n';
       }
@@ -621,7 +550,7 @@ async function generateMarketBriefing(db, symbols = null, apiKey = null) {
         let quote = await getStockQuote(symbol, apiKey);
 
         if (quote.error) {
-          const cached = await getLatestPrice(db, symbol);
+          const cached = getLatestPrice(db, symbol);
           if (cached) {
             quote = {
               symbol: cached.symbol,
@@ -631,7 +560,7 @@ async function generateMarketBriefing(db, symbols = null, apiKey = null) {
             };
           }
         } else {
-          await cacheStockPrice(db, quote.symbol, quote.price, quote.changePercent, quote.volume);
+          cacheStockPrice(db, quote.symbol, quote.price, quote.changePercent, quote.volume);
         }
 
         // Compact format for competitors
@@ -652,7 +581,7 @@ async function generateMarketBriefing(db, symbols = null, apiKey = null) {
   }
 
   // Check for unnotified SEC filings
-  const filings = await getUnnotifiedFilings(db);
+  const filings = getUnnotifiedFilings(db);
   if (filings.length > 0) {
     briefing += `\n\n<b>New SEC Filings</b>\n`;
     briefing += `${'─'.repeat(20)}\n`;
