@@ -78,3 +78,4 @@ bootstrap.md
 
 # Secrets (tokens, keys)
 .secrets/
+workspace/.env.global
